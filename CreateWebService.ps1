@@ -1,33 +1,28 @@
-if ($args.Length -lt 2 ) {
-	"usage ./CreateWebService.ps1 sitePrefix environment [sitePostfix=intern] [websitesRoot=C:\\inetpub\\wwwroot] [port=80] [forceDelete=false] [createScanningFolders=false]"
-    return  
-}
-
-
-
-[string] $sitePrefix = $args[0]
-[string] $environment = $args[1]
-[string] $sitePostfix = "intern"
-[string] $websitesRoot = "C:\\inetpub\\wwwroot"
-[bool] $forceDelete = $false
-[int] $port = 80
-[bool] $createScanningFolders = $false
-
-if ($args.Length -gt 2 ) {
-    $sitePostfix = $args[2]
-}
-if ($args.Length -gt 3 ) {
-    $websitesRoot = $args[3]
-}
-if ($args.Length -gt 4) {
-    $port = [System.Convert]::ToInt32($args[4])
-}
-if ($args.Length -gt 5) {
-    $forceDelete = [System.Convert]::ToBoolean($args[5])
-}
-if ($args.Length -gt 6) {
-    $createScanningFolders = [System.Convert]::ToBoolean($args[6])
-}
+## =====================================================================
+## Title       : Create-WebService
+## Description : Creates a webService on the local computer
+## Author      : Jan Baer
+## Date        : 3/30/2012
+## Input       : Create-WebService [-SitePrefix <String>] [-Environment <String>] [[-SitePostfix] <string>] [[-WebsitesRoot] <string>] [[-Port] <int>] [[-ForceDelete] <switch> [[-CreateScanningFolder] <switch>]]
+##                     
+## Output      : 
+## Usage       : Create-WebService -SitePrefix scan -Environment dev -ForceDelete -CreateScanningFolder
+##
+## Notes       :
+## Tag         : iis, deployment
+## Change log  :
+## =====================================================================
+Param (
+  [Parameter(Mandatory=$true, Position=0)]
+  [string]$SitePrefix,
+  [Parameter(Mandatory=$true, Position=1)]
+  [string]$Environment,
+  [string]$SitePostfix = "intern",
+  [string]$WebsitesRoot = "C:\\inetpub\\wwwroot",
+  [int]$Port = 80,
+  [switch]$ForceDelete,
+  [switch]$CreateScanningFolder
+)
 
 function Test-Admin { 
    $currentPrincipal = New-Object Security.Principal.WindowsPrincipal( [Security.Principal.WindowsIdentity]::GetCurrent() ) 
@@ -42,7 +37,8 @@ function Test-Admin {
 }
 
 function IsAspNet4Installed {
-	return [ADSI]("IIS://localhost/w3svc/AppPools/ASP.NET v4.0" )
+	$items = Get-ChildItem IIS:\AppPools | where {$_.Name -like ".NET v4.*" }
+	return ($items.Count -ne 0)
 }
 
 function ExistsWebSite($webSiteName) {
@@ -58,9 +54,14 @@ function ExistsWebSite($webSiteName) {
 function SetAccessRights($directory, $userName, $right) {
 	$acl = Get-Acl -Path $directory
 	$userAccount = New-Object System.Security.Principal.NTAccount("IIS AppPool", $userName) 
-	$permission = $userAccount, $right,"Allow"
+	$permission = $userAccount, $right, "ContainerInherit,ObjectInherit", "None", "Allow"
 	$right = New-Object System.Security.AccessControl.FileSystemAccessRule $permission
-	$acl.AddAccessRule($right)
+  if ($right -eq "FullControl") {
+    $acl.SetAccessRule($right)      
+  }
+	else {
+    $acl.AddAccessRule($right)
+  }
 	Set-Acl -AclObject $acl -Path $directory
 }
 
@@ -69,16 +70,8 @@ function CreateSubDirectory($parent, $directorName) {
     mkdir $fullPath
 }
 
-function WriteMessage([string]$message) {
-    $color = (Get-Host).UI.RawUI.ForegroundColor
-    (Get-Host).UI.RawUI.ForegroundColor="Green"
-    Write-Host $message
-    (Get-Host).UI.RawUI.ForegroundColor=$color
-}
-
-function CreateWebService ($webServiceName, $appPoolName, $directoryPath, $port ) {
-  $integrated=0
-  
+function CreateWebService($webServiceName, $appPoolName, $directoryPath, $Port) {
+  $integrated = 0
   New-WebAppPool -Name $appPoolName
   Set-ItemProperty IIS:AppPools\$appPoolName managedRuntimeVersion v4.0
   Set-ItemProperty IIS:AppPools\$appPoolName managedPipelineMode $integrated
@@ -94,7 +87,7 @@ function CreateScanningDirectoriesAndSetAccessRights($parentDirectory) {
   
   if (([System.IO.Directory]::Exists($scanningPath) -eq $true))
   {
-    if ($forceDelete -eq $false) {
+    if ($ForceDelete -eq $false) {
         return $false
     }
     else {
@@ -108,41 +101,36 @@ function CreateScanningDirectoriesAndSetAccessRights($parentDirectory) {
   CreateSubDirectory $scanningPath "Archive"
   CreateSubDirectory $scanningPath "NoAssigment"
 
-  SetAccessRights $scanningPath $appName "Modify"
-  SetAccessRights $processingPath $appName "Modify"
-  SetAccessRights $processingPath $appName "Delete"
-  SetAccessRights $processingPath $appName "DeleteSubDirectoriesAndFiles"
-  
   return $true
 }
 
 # Check system requirements
 if ((Test-Admin) -eq $false) {
-  Write-Error "This script requires admin rights!"
+  Write-Host "This script requires admin rights!" -f Red
   return
 }
 
 if ((get-module -name WebAdministration -erroraction silentlycontinue) -eq $false) {
-    Write-Error "The Powershell module for WebAdministration is not installed! Please check your IIS installation!"
+    Write-Host "The Powershell module for WebAdministration is not installed! Please check your IIS installation!" -f Red
+	return
 }
 
+Import-Module -Name WebAdministration
+
 if ((IsAspNet4Installed) -eq $null) {
-  Write-Error ".NET4.0 is not installed or not registered in IIS! Please check your Installation!"
+  Write-Host ".NET4.0 is not installed or not registered in IIS! Please check your Installation!" -f Red
   return
 }
 
-# Add system modules to access the WebAdministration modules
-Get-Module -ListAvailable | Where-Object {$_.Path -like "$PSHOME*"} | Import-Module
-
 # Built appName and directoryNames
-$appName = $sitePrefix + "-" + $environment + "-sp.check24." + $sitePostfix
-$webServicePath = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($websitesRoot, $appName))
+$appName = $SitePrefix + "-" + $Environment + "-sp.check24." + $SitePostfix
+$webServicePath = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($WebsitesRoot, $appName))
 $appPath = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($webServicePath, "Application"))
 $logPath = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($webServicePath, "Logs"))
 
-# check if Website already exists and exit the script when forceDelete == false
+# check if Website already exists and exit the script when ForceDelete == false
 if (ExistsWebSite($appName)) {
-  if ($forceDelete -eq $false) {
+  if ($ForceDelete -eq $false) {
     Write-Warning "The webService '$appName' already exists!"
     return
   }
@@ -152,18 +140,17 @@ if (ExistsWebSite($appName)) {
   }
 }
 
-WriteMessage
-WriteMessage "Create WebService '$appName' on '$appPath'"
+Write-Host
+Write-Host "Create WebService '$appName' on '$appPath'" -ForegroundColor Green
 
-if (([System.IO.Directory]::Exists($webServicePath) -eq $true))
-{
+if (([System.IO.Directory]::Exists($webServicePath) -eq $true)) {
     if ($forceDelete -eq $false) {
         Write-Warning "The directory $webServicePath already exists!"
         return $false
     }
     else {
         rm $webServicePath -Force -Recurse
-	}
+  }
 }
 
 mkdir $webServicePath
@@ -172,12 +159,14 @@ mkdir $logPath
 
 CreateWebService $appName $appName $appPath $port
 
-SetAccessRights $appPath $appName "Modify"
-SetAccessRights $logPath $appName "Modify"
+SetAccessRights $webServicePath $appName "FullControl"
 
-if ($createScanningFolders -eq $true) {
-	CreateScanningDirectoriesAndSetAccessRights $webServicePath
+if ($CreateScanningFolder -eq $true) {
+  CreateScanningDirectoriesAndSetAccessRights $webServicePath
 }
 
-WriteMessage
-WriteMessage "WebService '$appName' was successful created!"
+
+Write-Host
+Write-Host "WebService '$appName' was successful created!" -ForegroundColor Green
+
+
